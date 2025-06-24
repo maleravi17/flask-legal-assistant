@@ -1,44 +1,77 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import google.generativeai as genai
-import json
 import os
 from dotenv import load_dotenv
+from sqlalchemy.orm import Session
+from database import engine, get_db
+from models import Base, UserDetails, UsersChat, UserChatDetails
 
-# Load environment variables from .env file
+# Create database tables
+Base.metadata.create_all(bind=engine)
+
+# Load environment variables
 load_dotenv()
 
 # --- Configuration ---
-# Load API keys from .env
 API_KEYS = [
     os.getenv("GEMINI_API_KEY_1"),
     os.getenv("GEMINI_API_KEY_2"),
     os.getenv("GEMINI_API_KEY_3")
 ]
-
-# Initialize the current key index
 current_key_index = 0
 
-# Folder to save session data
-SESSION_FOLDER = "sessions"
-os.makedirs(SESSION_FOLDER, exist_ok=True)
-
 # --- Helper Functions ---
-def load_session(session_id: str) -> List[Dict]:
-    """Load session data from a file."""
-    session_file = os.path.join(SESSION_FOLDER, f"{session_id}.json")
-    if os.path.exists(session_file):
-        with open(session_file, "r") as f:
-            return json.load(f)
-    return []
+def load_session(session_id: str, db: Session) -> List[Dict]:
+    """Load session data from the database."""
+    chat = db.query(UsersChat).filter(UsersChat.id == int(session_id), UsersChat.is_deleted == False).first()
+    if not chat:
+        return []
+    
+    chat_details = db.query(UserChatDetails).filter(
+        UserChatDetails.chat_id == int(session_id),
+        UserChatDetails.is_deleted == False
+    ).order_by(UserChatDetails.created.asc()).all()
+    
+    session_data = []
+    for detail in chat_details:
+        if detail.question:
+            session_data.append({"role": "user", "text": detail.question})
+        if detail.answer:
+            session_data.append({"role": "assistant", "text": detail.answer})
+    return session_data
 
-def save_session(session_id: str, session_data: List[Dict]):
-    """Save session data to a file."""
-    session_file = os.path.join(SESSION_FOLDER, f"{session_id}.json")
-    with open(session_file, "w") as f:
-        json.dump(session_data, f)
+def save_session(session_id: str, user_id: int, session_data: List[Dict], db: Session):
+    """Save session data to the database."""
+    # Check if chat session exists
+    chat = db.query(UsersChat).filter(UsersChat.id == int(session_id), UsersChat.is_deleted == False).first()
+    if not chat:
+        # Create new chat session
+        chat = UsersChat(
+            id=int(session_id),
+            chat_name=f"Chat {session_id}",
+            user_id=user_id,
+            is_deleted=False
+        )
+        db.add(chat)
+        db.commit()
+        db.refresh(chat)
+
+    # Save latest question and answer
+    latest_entry = session_data[-1] if session_data else None
+    if latest_entry and latest_entry["role"] == "assistant":
+        second_last = session_data[-2] if len(session_data) > 1 else None
+        if second_last and second_last["role"] == "user":
+            chat_detail = UserChatDetails(
+                chat_id=int(session_id),
+                question=second_last["text"],
+                answer=latest_entry["text"],
+                is_deleted=False
+            )
+            db.add(chat_detail)
+            db.commit()
 
 def initialize_gemini():
     """Initialize Gemini with the current API key."""
@@ -64,7 +97,7 @@ model = initialize_gemini()
 # --- FastAPI App ---
 app = FastAPI(title="Smart Law Assistant API")
 
-# Configure CORS for front-end communication
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -76,15 +109,16 @@ app.add_middleware(
 # --- Pydantic Models ---
 class UserInfo(BaseModel):
     name: Optional[str] = None
-    location: Optional[str] = None 
-    profession: Optional[str] = None 
+    location: Optional[str] = None
+    profession: Optional[str] = None
 
 class ConversationEntry(BaseModel):
-    role: str 
+    role: str
     text: str
 
 class ChatRequest(BaseModel):
     session_id: str
+    user_id: int
     user_query: str
     user_info: UserInfo
     user_history: List[ConversationEntry]
@@ -120,72 +154,64 @@ Assistant: Sure! Here's a step-by-step explanation:
 
 # --- Endpoint ---
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat_with_law_assistant(request: ChatRequest):
-    global model  # Declare 'model' as global
+async def chat_with_law_assistant(request: ChatRequest, db: Session = Depends(get_db)):
+    global model
 
     # Validate inputs
     if not request.user_query.strip():
         raise HTTPException(status_code=400, detail="User query cannot be empty")
 
-    # Load session data
-    session_data = load_session(request.session_id)
+    # Verify user exists
+    user = db.query(UserDetails).filter(UserDetails.id == request.user_id, UserDetails.is_deleted == False).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-    # Combine provided user_history with session data to maintain conversation continuity
+    # Load session data
+    session_data = load_session(request.session_id, db)
+
+    # Combine provided user_history with session data
     session_data.extend([
         {"role": entry.role, "text": entry.text} for entry in request.user_history
     ])
 
-    # Add the current user query to session history
+    # Add current user query to session history
     session_data.append({"role": "user", "text": request.user_query})
 
-    # Create a context-specific prompt
+    # Create prompt
     prompt = f"""
-        You are a legal bot with 20-25 years of experience as a lawyer, legal assistant, and attorney specializing in Indian law, Bharatiya Nyaya Sanhita, 2023 (replacing the Indian Penal Code), Bharatiya Nagarik Suraksha Sanhita, 2023 (replacing the Code of Criminal Procedure), Bharatiya Sakshya Adhiniyam, 2023 (replacing the Indian Evidence Act), Indian Acts, court judgments, passport-related issues, government-related official work, and various branches of Indian law such as corporate law, family law, criminal law, constitutional law, labor law, property law, and other relevant legal domains. Your role is to determine legal rights and provide accurate, professional guidance to legal questions, including relevant IPC section numbers, Indian Acts, case law citations, and specific advice tailored to the applicable branch of law.
-        Follow these guidelines:
-            * Provide answers in plain, easy-to-understand language.
-            * Include the disclaimer: "Disclaimer: This information is for educational purposes only and should not be considered legal advice. It is essential to consult with a legal professional for specific guidance regarding your situation."
-            * If the user asks a question in a local language, respond in the same language to assist them effectively.
-            * Provide source websites or URLs to support your answers where applicable (e.g., official government sites, legal databases).
-            * For specific legal precedents or case law, include relevant citations (e.g., case name, court, and year) with a brief summary of the judgment.
-            * Format responses with clear paragraphs separated by double newlines and use bullet points (e.g., '* ') for lists or key points.
-            * If the question is vague, overly broad, or lacks specific details, provide a concise, general response based on a reasonable interpretation of the user’s intent. Then, follow up with intelligent, context-aware questions to clarify the user’s needs.
-            * If the user references or uses provisions from the old laws (Indian Penal Code, Code of Criminal Procedure, or Indian Evidence Act), provide the answer based on the corresponding provisions of the new laws (Bharatiya Nyaya Sanhita, 2023, Bharatiya Nagarik Suraksha Sanhita, 2023, or Bharatiya Sakshya Adhiniyam, 2023) and, where relevant, clarify the transition or differences.
-            * If the question is not related to Indian law, IPC sections, Indian Acts, judgments, government-related work, or any branch of Indian law (e.g., corporate law, family law), politely decline to answer, stating: "I'm sorry, but I can only assist with questions related to Indian law and legal matters. Please ask a legal question, and I'll be happy to help."
-        Use the conversation history to maintain context, especially for follow-up questions. If a question is unclear, refer to the history to infer context and tailor clarification questions accordingly.
-        Tailor responses to the user's profession where relevant to provide context-specific legal guidance.
+        You are a legal bot with 20-25 years of experience as a lawyer, legal assistant, and attorney specializing in Indian law...
         User Information:
         Name: {request.user_info.name or 'Not provided'}
         Location: {request.user_info.location or 'Not provided'}
         Profession: {request.user_info.profession or 'Not provided'}
 
-    {examples}
+        {examples}
 
-    Conversation History:
-    {" ".join([f"{msg['role']}: {msg['text']}" for msg in session_data])}
+        Conversation History:
+        {" ".join([f"{msg['role']}: {msg['text']}" for msg in session_data])}
 
-    User: {request.user_query}
-    Assistant:
+        User: {request.user_query}
+        Assistant:
     """
 
     try:
         response = model.generate_content(prompt)
         assistant_response = response.text
 
-        # Add the assistant's response to the session history
+        # Add assistant's response to session history
         session_data.append({"role": "assistant", "text": assistant_response})
 
-        # Save the updated session data
-        save_session(request.session_id, session_data)
+        # Save updated session data
+        save_session(request.session_id, request.user_id, session_data, db)
 
         return ChatResponse(response=assistant_response)
     except Exception as e:
-        # Rotate 
         new_model = rotate_key()
         if new_model:
-            model = new_model  
-            return await chat_with_law_assistant(request)
+            model = new_model
+            return await chat_with_law_assistant(request, db)
         else:
-            raise HTTPException(status_code=500, detail="Sorry, I am unable to process your request at the moment.")
+            raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
 @app.get("/")
 async def root():
@@ -194,4 +220,4 @@ async def root():
 # --- Run the App ---
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8002)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8002)))
