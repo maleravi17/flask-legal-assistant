@@ -148,7 +148,6 @@ async def chat_with_law_assistant(request: ChatRequest):
     except Exception as e:
         new_model = rotate_key()
         if new_model:
-            global model
             model = new_model
             return await chat_with_law_assistant(request)
         else:
