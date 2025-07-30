@@ -1,16 +1,10 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import google.generativeai as genai
 import os
 from dotenv import load_dotenv
-from sqlalchemy.orm import Session
-from database import engine, get_db
-from models import Base, UserDetails, UsersChat, UserChatDetails
-
-# Create database tables
-Base.metadata.create_all(bind=engine)
 
 # Load environment variables
 load_dotenv()
@@ -24,55 +18,6 @@ API_KEYS = [
 current_key_index = 0
 
 # --- Helper Functions ---
-def load_session(session_id: str, db: Session) -> List[Dict]:
-    """Load session data from the database."""
-    chat = db.query(UsersChat).filter(UsersChat.id == int(session_id), UsersChat.is_deleted == False).first()
-    if not chat:
-        return []
-    
-    chat_details = db.query(UserChatDetails).filter(
-        UserChatDetails.chat_id == int(session_id),
-        UserChatDetails.is_deleted == False
-    ).order_by(UserChatDetails.created.asc()).all()
-    
-    session_data = []
-    for detail in chat_details:
-        if detail.question:
-            session_data.append({"role": "user", "text": detail.question})
-        if detail.answer:
-            session_data.append({"role": "assistant", "text": detail.answer})
-    return session_data
-
-def save_session(session_id: str, user_id: int, session_data: List[Dict], db: Session):
-    """Save session data to the database."""
-    # Check if chat session exists
-    chat = db.query(UsersChat).filter(UsersChat.id == int(session_id), UsersChat.is_deleted == False).first()
-    if not chat:
-        # Create new chat session
-        chat = UsersChat(
-            id=int(session_id),
-            chat_name=f"Chat {session_id}",
-            user_id=user_id,
-            is_deleted=False
-        )
-        db.add(chat)
-        db.commit()
-        db.refresh(chat)
-
-    # Save latest question and answer
-    latest_entry = session_data[-1] if session_data else None
-    if latest_entry and latest_entry["role"] == "assistant":
-        second_last = session_data[-2] if len(session_data) > 1 else None
-        if second_last and second_last["role"] == "user":
-            chat_detail = UserChatDetails(
-                chat_id=int(session_id),
-                question=second_last["text"],
-                answer=latest_entry["text"],
-                is_deleted=False
-            )
-            db.add(chat_detail)
-            db.commit()
-
 def initialize_gemini():
     """Initialize Gemini with the current API key."""
     global current_key_index
@@ -164,27 +109,17 @@ Since your location and profession are not provided, consult a local lawyer for 
 
 # --- Endpoint ---
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat_with_law_assistant(request: ChatRequest, db: Session = Depends(get_db)):
+async def chat_with_law_assistant(request: ChatRequest):
     global model
 
     # Validate inputs
     if not request.user_query.strip():
         raise HTTPException(status_code=400, detail="User query cannot be empty")
 
-    # Verify user exists
-    user = db.query(UserDetails).filter(UserDetails.id == request.user_id, UserDetails.is_deleted == False).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Load session data
-    session_data = load_session(request.session_id, db)
-
-    # Combine provided user_history with session data
-    session_data.extend([
+    # Combine provided user_history with current query
+    session_data = [
         {"role": entry.role, "text": entry.text} for entry in request.user_history
-    ])
-
-    # Add current user query to session history
+    ]
     session_data.append({"role": "user", "text": request.user_query})
 
     # Create prompt
@@ -209,18 +144,13 @@ async def chat_with_law_assistant(request: ChatRequest, db: Session = Depends(ge
         response = model.generate_content(prompt)
         assistant_response = response.text
 
-        # Add assistant's response to session history
-        session_data.append({"role": "assistant", "text": assistant_response})
-
-        # Save updated session data
-        save_session(request.session_id, request.user_id, session_data, db)
-
         return ChatResponse(response=assistant_response)
     except Exception as e:
         new_model = rotate_key()
         if new_model:
+            global model
             model = new_model
-            return await chat_with_law_assistant(request, db)
+            return await chat_with_law_assistant(request)
         else:
             raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
