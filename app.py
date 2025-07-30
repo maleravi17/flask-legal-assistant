@@ -78,7 +78,7 @@ def initialize_gemini():
     global current_key_index
     try:
         genai.configure(api_key=API_KEYS[current_key_index])
-        return genai.GenerativeModel('gemini-2.0-flash-001')
+        return genai.GenerativeModel('gemini-2.5-pro')
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error initializing Gemini: {e}")
 
@@ -130,26 +130,36 @@ class ChatResponse(BaseModel):
 # --- Two-shot Prompting Examples ---
 examples = """
 Example 1:
-User: What is the difference between civil law and criminal law?
-Assistant: Civil law deals with disputes between individuals or organizations, such as contracts or property disputes. Criminal law, on the other hand, involves actions that are harmful to society and are prosecuted by the state, such as theft or assault.
+User Information: Name: Anil, Location: Mumbai, Maharashtra, Profession: Business Owner
+User: What are the legal requirements for starting a small business?
+Assistant: As a business owner in Mumbai, Maharashtra, you must comply with Indian and state-specific regulations. Key requirements include:
+1. **Business Registration**: Register your business as a sole proprietorship, partnership, or private limited company under the Companies Act, 2013.
+2. **GST Registration**: If your annual turnover exceeds ₹40 lakhs (₹20 lakhs for services), register for GST as per the CGST Act, 2017.
+3. **Shops and Establishments Act**: Obtain a license from the Maharashtra Labour Department for your business premises in Mumbai.
+4. **Local Permits**: Secure trade licenses from the Brihanmumbai Municipal Corporation (BMC) for operating in Mumbai.
+5. **Tax Compliance**: Obtain a PAN and TAN for tax purposes.
+Consult a local lawyer in Mumbai to ensure compliance with Maharashtra-specific regulations.
 
 Example 2:
-User: Can a lawyer represent both parties in a case?
-Assistant: No, a lawyer cannot represent both parties in a case due to a conflict of interest. It is unethical and prohibited by legal professional standards.
+User Information: Name: Priya, Location: Chennai, Tamil Nadu, Profession: Student
+User: Can a landlord evict a tenant without notice?
+Assistant: As a student in Chennai, Tamil Nadu, understanding tenant rights is important. Under the Tamil Nadu Regulation of Rights and Responsibilities of Landlords and Tenants Act, 2017, a landlord cannot evict a tenant without notice. They must provide a written notice period (typically 30 days) and follow due process, such as obtaining a court order for eviction. For student accommodations, check your rental agreement for specific terms and consult a legal aid clinic in Chennai for affordable advice.
 
 Example 3:
+User Information: Name: Not provided, Location: Not provided, Profession: Not provided
 User: Explain the process of filing a lawsuit in civil court.
-Assistant: Sure! Here's a step-by-step explanation:
-1. **Consult a Lawyer**: Discuss your case with a lawyer to understand your legal options.
-2. **Draft the Complaint**: Prepare a legal document outlining your claims and the relief you seek.
-3. **File the Complaint**: Submit the complaint to the appropriate court and pay the filing fee.
-4. **Serve the Defendant**: Notify the defendant about the lawsuit by serving them the complaint.
-5. **Await Response**: The defendant has a specified time to respond to the complaint.
-6. **Discovery Phase**: Both parties exchange information and evidence related to the case.
-7. **Pre-Trial Motions**: Either party can file motions to resolve the case before trial.
-8. **Trial**: If the case proceeds to trial, both parties present their arguments and evidence.
-9. **Judgment**: The judge or jury delivers a verdict.
-10. **Appeal**: If either party is dissatisfied, they can appeal the decision.
+Assistant: Here’s a general step-by-step process for filing a lawsuit in an Indian civil court:
+1. **Consult a Lawyer**: Discuss your case to understand legal options.
+2. **Draft the Complaint**: Prepare a document outlining your claims.
+3. **File the Complaint**: Submit it to the appropriate civil court with the filing fee.
+4. **Serve the Defendant**: Notify the defendant by serving the complaint.
+5. **Await Response**: The defendant has time to respond.
+6. **Discovery Phase**: Exchange evidence with the other party.
+7. **Pre-Trial Motions**: File motions to resolve issues before trial.
+8. **Trial**: Present your case before a judge.
+9. **Judgment**: Receive the court’s decision.
+10. **Appeal**: Appeal if needed.
+Since your location and profession are not provided, consult a local lawyer for jurisdiction-specific guidance.
 """
 
 # --- Endpoint ---
@@ -179,7 +189,8 @@ async def chat_with_law_assistant(request: ChatRequest, db: Session = Depends(ge
 
     # Create prompt
     prompt = f"""
-        You are a legal bot with 20-25 years of experience as a lawyer, legal assistant, and attorney specializing in Indian law...
+        You are a legal bot with 20-25 years of experience as a lawyer, legal assistant, and attorney specializing in Indian law. Your goal is to provide accurate and helpful legal information tailored to the user's location and profession. If the location is provided (e.g., a city or state in India), incorporate relevant state-specific laws or local regulations. If the profession is provided (e.g., business owner, student, teacher), adjust the response to suit their context or needs. If location or profession is not provided, provide a general response applicable across India but mention that consulting a local lawyer is advisable for specific advice. Always include a disclaimer that your response is for educational purposes only and not a substitute for professional legal advice.
+
         User Information:
         Name: {request.user_info.name or 'Not provided'}
         Location: {request.user_info.location or 'Not provided'}
